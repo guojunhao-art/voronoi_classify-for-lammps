@@ -17,7 +17,7 @@ class CSVBatchedDataset(IterableDataset):
     split: "train" 或 "val"，通过行号哈希划分，确保每条数据都参与训练/验证之一。
     """
     def __init__(self, csv_path, split="train", val_ratio=0.2, chunksize=500_000, sample_frac=1.0,
-                 split_seed=42, shuffle_within_chunk=True):
+                 split_seed=42, shuffle_within_chunk=True, batch_size=2048):
         super().__init__()
         if split not in ("train", "val"):
             raise ValueError("split must be 'train' or 'val'")
@@ -32,6 +32,9 @@ class CSVBatchedDataset(IterableDataset):
         self.sample_frac = sample_frac
         self.split_seed = int(split_seed)
         self.shuffle_within_chunk = bool(shuffle_within_chunk)
+        self.batch_size = int(batch_size)
+        if self.batch_size <= 0:
+            raise ValueError("batch_size must be > 0")
 
     def __iter__(self):
         row_start = 0
@@ -65,8 +68,11 @@ class CSVBatchedDataset(IterableDataset):
                     selected = selected.sample(frac=1.0, random_state=self.split_seed + row_start).reset_index(drop=True)
                 features = selected.iloc[:, 0:40].to_numpy(dtype=np.float32).reshape(-1, 1, 10, 4)
                 labels = selected.iloc[:, 40].to_numpy(dtype=np.int64)
-                for i in range(len(selected)):
-                    yield torch.from_numpy(features[i]), torch.tensor(labels[i], dtype=torch.long)
+                for start in range(0, len(selected), self.batch_size):
+                    end = min(start + self.batch_size, len(selected))
+                    x = torch.from_numpy(features[start:end])
+                    y = torch.from_numpy(labels[start:end]).to(torch.long)
+                    yield x, y
 
             row_start += original_n
 
@@ -161,15 +167,16 @@ def main():
 
     train_ds = CSVBatchedDataset(
         csv_path=csv_path, split="train", val_ratio=val_ratio, chunksize=chunksize, sample_frac=sample_frac,
-        split_seed=42, shuffle_within_chunk=True
+        split_seed=42, shuffle_within_chunk=True, batch_size=batch_size
     )
     val_ds = CSVBatchedDataset(
         csv_path=csv_path, split="val", val_ratio=val_ratio, chunksize=chunksize, sample_frac=sample_frac,
-        split_seed=42, shuffle_within_chunk=False
+        split_seed=42, shuffle_within_chunk=False, batch_size=batch_size
     )
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=False, num_workers=0)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
+    # 数据集已经按 batch 产出，DataLoader 不再二次组 batch
+    train_loader = DataLoader(train_ds, batch_size=None, shuffle=False, num_workers=0)
+    val_loader = DataLoader(val_ds, batch_size=None, shuffle=False, num_workers=0)
 
     model = CNNClassifier().to(device)
     criterion = nn.CrossEntropyLoss()
