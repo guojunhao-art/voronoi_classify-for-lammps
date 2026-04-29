@@ -16,7 +16,8 @@ class CSVBatchedDataset(IterableDataset):
     以 chunk 方式流式读取 CSV，避免将整个数据集一次性读入内存。
     split: "train" 或 "val"，通过行号哈希划分，确保每条数据都参与训练/验证之一。
     """
-    def __init__(self, csv_path, split="train", val_ratio=0.2, chunksize=500_000, sample_frac=1.0):
+    def __init__(self, csv_path, split="train", val_ratio=0.2, chunksize=500_000, sample_frac=1.0,
+                 split_seed=42, shuffle_within_chunk=True):
         super().__init__()
         if split not in ("train", "val"):
             raise ValueError("split must be 'train' or 'val'")
@@ -29,7 +30,8 @@ class CSVBatchedDataset(IterableDataset):
         self.val_ratio = val_ratio
         self.chunksize = chunksize
         self.sample_frac = sample_frac
-        self.val_mod = int(round(self.val_ratio * 1000))
+        self.split_seed = int(split_seed)
+        self.shuffle_within_chunk = bool(shuffle_within_chunk)
 
     def __iter__(self):
         row_start = 0
@@ -51,13 +53,16 @@ class CSVBatchedDataset(IterableDataset):
                     continue
 
             global_ids = row_start + np.arange(n, dtype=np.int64)
-            is_val = (global_ids % 1000) < self.val_mod
+            split_rng = np.random.default_rng(self.split_seed + row_start)
+            is_val = split_rng.random(n) < self.val_ratio
             if self.split == "train":
                 selected = chunk.loc[~is_val]
             else:
                 selected = chunk.loc[is_val]
 
             if len(selected) > 0:
+                if self.shuffle_within_chunk:
+                    selected = selected.sample(frac=1.0, random_state=self.split_seed + row_start).reset_index(drop=True)
                 features = selected.iloc[:, 0:40].to_numpy(dtype=np.float32).reshape(-1, 1, 10, 4)
                 labels = selected.iloc[:, 40].to_numpy(dtype=np.int64)
                 for i in range(len(selected)):
@@ -155,10 +160,12 @@ def main():
     chunksize = 500_000
 
     train_ds = CSVBatchedDataset(
-        csv_path=csv_path, split="train", val_ratio=val_ratio, chunksize=chunksize, sample_frac=sample_frac
+        csv_path=csv_path, split="train", val_ratio=val_ratio, chunksize=chunksize, sample_frac=sample_frac,
+        split_seed=42, shuffle_within_chunk=True
     )
     val_ds = CSVBatchedDataset(
-        csv_path=csv_path, split="val", val_ratio=val_ratio, chunksize=chunksize, sample_frac=sample_frac
+        csv_path=csv_path, split="val", val_ratio=val_ratio, chunksize=chunksize, sample_frac=sample_frac,
+        split_seed=42, shuffle_within_chunk=False
     )
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=False, num_workers=0)
