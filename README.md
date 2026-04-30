@@ -19,7 +19,62 @@
   - `read_pytorch.py`：加载 state_dict，对 CSV 特征做推理，行为与原 TensorFlow `read.py` 对齐。  
   - `export_torchscript.py`：从现有 state_dict 导出 TorchScript（无需重新训练）。  
   - `compare.py`：在 Python 端对比 state_dict 模型与 TorchScript 模型输出是否完全一致。  
+  - `shuffle_dataset_csv.py`：超大 CSV 外部打乱（分桶 + 桶内打乱，内存友好）。  
+  - `build_balanced_dataset.py`：按基准数据集规模对其它数据集做随机下采样并合并。  
+  - `remap_atom_type_in_features.py`：对 40 维特征中的类型列做可配置映射（如 `1:3`）。  
   - 其它脚本（`main.py`, `read.py`, `process.py` 等）：原 TensorFlow 流程及特征构造相关代码，仅作为参考/对照。
+
+---
+
+## 0.1 文件级详细说明（按目录）
+
+> 本节用于“看到文件名就知道用途”，方便后续维护与协作。
+
+### 根目录
+
+- `README.md`：项目总说明（你当前正在阅读的文件）。  
+- `lammps_voronoi_classify/`：LAMMPS 侧 C++ 扩展与构建片段。  
+- `pytorch_model/`：模型训练、推理、数据处理脚本与样例数据。
+
+### `lammps_voronoi_classify/`
+
+- `compute_voronoi_atom.h/.cpp`  
+  基于官方 `compute voronoi/atom` 的增强版本，新增 `comm_ghost` 关键字，将 Voronoi 体积/面数同步到 ghost 原子，供 classify 读取。  
+- `compute_voronoi_classify_atom.h/.cpp`  
+  新增 `compute voronoi/classify/atom`：从邻居列表构建 40 维特征（中心 + 前 9 近邻），并可选加载 TorchScript 在 LAMMPS 内推理。  
+- `README.txt`  
+  面向 LAMMPS 用户的实现说明、命令语法、示例输入脚本。  
+- `BUILD_CMAKE.md`  
+  仅特征模式 / 推理模式两套 CMake 构建路径与常见问题。  
+- `VORONOI_cmake_append_snippet.cmake`  
+  追加到 LAMMPS `VORONOI.cmake` 后，提供 `PKG_VORONOI_TORCH` 开关与 LibTorch 链接逻辑。  
+- `VORONOI_voro_build_fix.cmake`  
+  处理 Intel / `nvcc_wrapper` 环境下 Voro++ 构建兼容性（让 Voro++ 单独用 g++）。
+
+### `pytorch_model/`（核心）
+
+- `main_pytorch.py`  
+  主训练脚本（支持超大 CSV 流式读取）；默认执行“训练 + 保存 state_dict + 导出 TorchScript”，也支持 `--export-only` 仅转换模型。  
+- `read_pytorch.py`  
+  使用 `state_dict` 进行离线预测，输入 CSV 前 40 列特征，输出 0/1 分类结果。  
+- `export_torchscript.py`  
+  从已有 `state_dict` 导出 TorchScript（无需再次训练）。  
+- `compare.py`  
+  对比 `state_dict` 与 TorchScript 在同一输入上的输出一致性。  
+- `shuffle_dataset_csv.py`  
+  大文件外部打乱：先按随机 key 分桶，再逐桶打乱并拼接，避免整文件入内存。  
+- `build_balanced_dataset.py`  
+  数据集平衡工具：保留基准数据集全量，对其它数据按目标规模随机下采样后合并。  
+- `remap_atom_type_in_features.py`  
+  特征重映射工具：针对 40 维中类型列（3,7,...,39）应用用户指定映射（`--map old:new` 可重复）。  
+- `dataset_structure.txt`  
+  40 维特征 + 标签的严格列定义（最重要的数据格式契约）。  
+- `dataset.csv` / `data.csv`  
+  示例训练/推理数据。  
+- `mix.ver1.0.pytorch.pt` / `mix.ver1.0.torchscript.pt`  
+  示例模型文件（分别为 state_dict 与 TorchScript）。  
+- `main.py`, `read.py`, `process.py`, `read_pytorch.py`, `main_pytorch.py` 等  
+  兼容历史流程与对照验证脚本；建议优先使用本 README 标注的“核心脚本”。
 
 ---
 
@@ -263,4 +318,3 @@ compute pred all voronoi/classify/atom voro /path/to/model.torchscript.pt
 - LAMMPS 本身遵循 GPLv2 许可证，详见 LAMMPS 官方仓库。  
 - 本项目中对 LAMMPS 的修改和新增文件，遵循与 LAMMPS 一致的许可证约定。  
 - PyTorch / LibTorch 遵循其各自的开源许可证，使用时请参考官方文档。
-
