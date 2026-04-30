@@ -3,11 +3,32 @@ PyTorch 版本训练脚本，与原 TensorFlow main.py 等效。
 数据集: dataset.csv (40 特征 + 1 标签，二分类)
 """
 import os
+import argparse
 import pandas as pd
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, IterableDataset
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train CNN model and/or export TorchScript.")
+    parser.add_argument("--export-only", action="store_true",
+                        help="仅导出 TorchScript，不进行训练")
+    parser.add_argument("--state-dict-in", default="saved_model/mix.ver1.0.pytorch.pt",
+                        help="导出模式下加载的 state_dict 路径")
+    parser.add_argument("--state-dict-out", default="saved_model/mix.ver1.0.pytorch.pt",
+                        help="训练模式下保存的 state_dict 路径")
+    parser.add_argument("--torchscript-out", default="saved_model/mix.ver1.0.torchscript.pt",
+                        help="TorchScript 输出路径")
+    parser.add_argument("--csv-path", default="dataset.csv", help="训练 CSV 路径")
+    parser.add_argument("--batch-size", type=int, default=2048, help="训练 batch size")
+    parser.add_argument("--epochs", type=int, default=10, help="训练 epoch")
+    parser.add_argument("--lr", type=float, default=5e-5, help="学习率")
+    parser.add_argument("--val-ratio", type=float, default=0.2, help="验证集比例")
+    parser.add_argument("--sample-frac", type=float, default=1.0, help="训练抽样比例")
+    parser.add_argument("--chunksize", type=int, default=500_000, help="CSV 分块大小")
+    return parser.parse_args()
 
 
 # --------------- 1. 数据加载与预处理（流式，支持超大 CSV） ---------------
@@ -151,52 +172,52 @@ def evaluate(model, loader, criterion, device):
 
 
 def main():
+    args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    # 超参与 TF 一致
-    batch_size = 2048
-    epochs = 10
-    lr = 5e-5
+    model = CNNClassifier()
+    if not args.export_only:
+        train_ds = CSVBatchedDataset(
+            csv_path=args.csv_path, split="train", val_ratio=args.val_ratio, chunksize=args.chunksize,
+            sample_frac=args.sample_frac, split_seed=42, shuffle_within_chunk=True, batch_size=args.batch_size
+        )
+        val_ds = CSVBatchedDataset(
+            csv_path=args.csv_path, split="val", val_ratio=args.val_ratio, chunksize=args.chunksize,
+            sample_frac=args.sample_frac, split_seed=42, shuffle_within_chunk=False, batch_size=args.batch_size
+        )
 
-    # 关键参数：sample_frac=1.0 表示全量数据参与训练/验证划分
-    csv_path = "dataset.csv"
-    val_ratio = 0.2
-    sample_frac = 1.0
-    chunksize = 500_000
+        # 数据集已经按 batch 产出，DataLoader 不再二次组 batch
+        train_loader = DataLoader(train_ds, batch_size=None, shuffle=False, num_workers=0)
+        val_loader = DataLoader(val_ds, batch_size=None, shuffle=False, num_workers=0)
 
-    train_ds = CSVBatchedDataset(
-        csv_path=csv_path, split="train", val_ratio=val_ratio, chunksize=chunksize, sample_frac=sample_frac,
-        split_seed=42, shuffle_within_chunk=True, batch_size=batch_size
-    )
-    val_ds = CSVBatchedDataset(
-        csv_path=csv_path, split="val", val_ratio=val_ratio, chunksize=chunksize, sample_frac=sample_frac,
-        split_seed=42, shuffle_within_chunk=False, batch_size=batch_size
-    )
+        model = model.to(device)
+        criterion = nn.CrossEntropyLoss()
+        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999), eps=1e-10)
 
-    # 数据集已经按 batch 产出，DataLoader 不再二次组 batch
-    train_loader = DataLoader(train_ds, batch_size=None, shuffle=False, num_workers=0)
-    val_loader = DataLoader(val_ds, batch_size=None, shuffle=False, num_workers=0)
+        for epoch in range(1, args.epochs + 1):
+            train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device)
+            val_loss, val_acc = evaluate(model, val_loader, criterion, device)
+            print(f"Epoch {epoch}/{args.epochs}  train_loss={train_loss:.4f}  train_acc={train_acc:.4f}  val_loss={val_loss:.4f}  val_acc={val_acc:.4f}")
 
-    model = CNNClassifier().to(device)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, betas=(0.9, 0.999), eps=1e-10)
-
-    for epoch in range(1, epochs + 1):
-        train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device)
-        val_loss, val_acc = evaluate(model, val_loader, criterion, device)
-        print(f"Epoch {epoch}/{epochs}  train_loss={train_loss:.4f}  train_acc={train_acc:.4f}  val_loss={val_loss:.4f}  val_acc={val_acc:.4f}")
-
-    os.makedirs("saved_model", exist_ok=True)
-    torch.save(model.state_dict(), "saved_model/mix.ver1.0.pytorch.pt")
-    print("Model saved to saved_model/mix.ver1.0.pytorch.pt (state_dict, for read_pytorch.py)")
+        os.makedirs(os.path.dirname(args.state_dict_out) or ".", exist_ok=True)
+        torch.save(model.state_dict(), args.state_dict_out)
+        print(f"Model saved to {args.state_dict_out} (state_dict, for read_pytorch.py)")
+    else:
+        state = torch.load(args.state_dict_in, map_location="cpu")
+        model.load_state_dict(state, strict=True)
+        print(f"Loaded state_dict from: {args.state_dict_in}")
 
     # 导出 TorchScript 供 LAMMPS compute voronoi/classify/atom 加载（torch::jit::load 只认此格式）
-    model.eval()
-    example = torch.randn(1, 1, 10, 4)  # (batch, channel, NGROUPS=10, NPER=4)，与 LAMMPS 输入一致
-    traced = torch.jit.trace(model, example)
-    traced.save("saved_model/mix.ver1.0.torchscript.pt")
-    print("TorchScript (LAMMPS-loadable): saved_model/mix.ver1.0.torchscript.pt")
+    # 为避免 cpu/cuda 设备不一致报错，导出时统一在 CPU 上进行
+    model_cpu = CNNClassifier()
+    model_cpu.load_state_dict(model.state_dict(), strict=True)
+    model_cpu.eval()
+    example = torch.randn(1, 1, 10, 4)  # CPU example
+    traced = torch.jit.trace(model_cpu, example)
+    os.makedirs(os.path.dirname(args.torchscript_out) or ".", exist_ok=True)
+    traced.save(args.torchscript_out)
+    print(f"TorchScript (LAMMPS-loadable): {args.torchscript_out}")
 
 
 if __name__ == "__main__":
